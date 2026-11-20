@@ -41,19 +41,28 @@ def content_filter(response: str) -> dict:
 
     # PII patterns to check
     PII_PATTERNS = {
-        # TODO: Add regex patterns for:
-        # - VN phone number: r"0\d{9,10}"
-        # - Email: r"[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}"
-        # - National ID (CMND/CCCD): r"\b\d{9}\b|\b\d{12}\b"
-        # - API key pattern: r"sk-[a-zA-Z0-9-]+"
-        # - Password pattern: r"password\s*[:=]\s*\S+"
+        "vn_phone": r"\b0\d{9,10}\b",
+        "email": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
+        "national_id": r"\b\d{9}\b|\b\d{12}\b",
+        "api_key": r"\bsk-[a-zA-Z0-9_-]+\b",
+        "password": r"(?:admin\s+)?password\s*(?:is|[:=])\s*\S+",
     }
 
     for name, pattern in PII_PATTERNS.items():
-        matches = re.findall(pattern, response, re.IGNORECASE)
+        matches = re.findall(pattern, redacted, re.IGNORECASE)
         if matches:
             issues.append(f"{name}: {len(matches)} found")
             redacted = re.sub(pattern, "[REDACTED]", redacted, flags=re.IGNORECASE)
+
+    # Check against DEMO secrets
+    try:
+        from core.config import DEMO_SECRETS
+        for secret in DEMO_SECRETS:
+            if secret and secret in redacted:
+                issues.append(f"demo_secret: {secret}")
+                redacted = redacted.replace(secret, "[REDACTED]")
+    except Exception:
+        pass
 
     return {
         "safe": len(issues) == 0,
@@ -172,17 +181,26 @@ class OutputGuardrailPlugin(base_plugin.BasePlugin):
         if not response_text:
             return llm_response
 
-        # TODO: Implement logic:
-        # 1. Call content_filter(response_text)
-        #    - If issues found: replace llm_response.content with redacted version
-        #    - Increment self.redacted_count
-        # 2. If use_llm_judge: call llm_safety_check(response_text)
-        #    - If unsafe: replace llm_response.content with a safe message
-        #    - Increment self.blocked_count
-        # 3. Return llm_response (possibly modified)
+        filter_res = content_filter(response_text)
+        if not filter_res["safe"]:
+            self.redacted_count += 1
+            if hasattr(llm_response, "content") and llm_response.content:
+                llm_response.content = types.Content(
+                    role="model",
+                    parts=[types.Part.from_text(text=filter_res["redacted"])],
+                )
 
-        return llm_response  # TODO: modify if needed
+        if self.use_llm_judge:
+            judge_res = await llm_safety_check(response_text)
+            if not judge_res.get("safe", True):
+                self.blocked_count += 1
+                if hasattr(llm_response, "content") and llm_response.content:
+                    llm_response.content = types.Content(
+                        role="model",
+                        parts=[types.Part.from_text(text="I cannot share internal system details.")],
+                    )
 
+        return llm_response
 
 # ============================================================
 # Quick tests
